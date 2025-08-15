@@ -9,22 +9,36 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 import pickle
 
-MAX_CHARS = 3000  # Safe chunk size
-EMBED_DIM = 384   # Embedding dimension for all-MiniLM-L6-v2
-TOP_K = 3         # Number of relevant chunks to retrieve
+# -------------------- Config --------------------
+MAX_CHARS = 3000  # Safe chunk size for embedding
+EMBED_DIM = 384   # all-MiniLM-L6-v2 embedding dimension
+TOP_K = 5         # Number of chunks to retrieve
 FAISS_FILE = "faiss_index.bin"
 MAPPING_FILE = "chunk_mapping.pkl"
 
-# Initialize embedding model
+# -------------------- Globals --------------------
 embed_model = SentenceTransformer('all-MiniLM-L6-v2')
-
 faiss_index = None
 chunk_mapping = []
 
 # -------------------- Helpers --------------------
 def chunk_text(text, max_chars=MAX_CHARS):
-    """Split text into manageable chunks."""
     return [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
+
+def chunk_file_content(filename, content):
+    """Chunk content intelligently based on file type."""
+    chunks = []
+    if filename.endswith('.json') and isinstance(content, (dict, list)):
+        if isinstance(content, dict):
+            for k, v in content.items():
+                chunks.append(json.dumps({k: v}))
+        else:  # list
+            for elem in content:
+                chunks.append(json.dumps(elem))
+    else:
+        text = json.dumps(content) if isinstance(content, (dict, list)) else str(content)
+        chunks = chunk_text(text)
+    return chunks
 
 def save_faiss():
     """Persist FAISS index and mapping to disk."""
@@ -43,9 +57,8 @@ def load_faiss():
             chunk_mapping = pickle.load(f)
         print(f"[Info] Loaded FAISS index with {len(chunk_mapping)} chunks.")
 
-# -------------------- Ollama Interaction --------------------
+# -------------------- Ollama --------------------
 def ask_ollama_stream(question, conversation_history, model="llama3", stream_placeholder=None):
-    """Send prompt to Ollama and optionally stream to Streamlit."""
     conversation_history.append({"role": "user", "content": question})
     full_response = ""
     try:
@@ -69,25 +82,20 @@ def ask_ollama_stream(question, conversation_history, model="llama3", stream_pla
             stream_placeholder.text(err_msg)
         return err_msg
 
-# -------------------- FAISS Memory --------------------
+# -------------------- FAISS --------------------
 def create_or_update_faiss(aggregated_content):
-    """
-    Convert all files to embeddings and store in FAISS.
-    Updates existing FAISS index if it exists.
-    """
+    """Create or update FAISS index with new content."""
     global faiss_index, chunk_mapping
-    new_chunks = []
-    new_mapping = []
+    new_chunks, new_mapping = [], []
 
     for item in aggregated_content:
-        content = item['content']
-        content_str = json.dumps(content) if isinstance(content, (dict, list)) else str(content)
-        for chunk in chunk_text(content_str):
+        chunks = chunk_file_content(item['filename'], item['content'])
+        for chunk in chunks:
             new_chunks.append(chunk)
             new_mapping.append({
-                'filename': item['filename'],
-                'type': item['type'],
-                'content': chunk
+                "filename": item['filename'],
+                "type": item['type'],
+                "content": chunk
             })
 
     if new_chunks:
@@ -101,41 +109,61 @@ def create_or_update_faiss(aggregated_content):
             chunk_mapping = new_mapping
 
     save_faiss()
+    print(f"[Info] FAISS index updated. Total chunks: {len(chunk_mapping)}")
 
 # -------------------- AI Q&A --------------------
-def ask_ai(question, conversation_history, top_k=TOP_K, stream_placeholder=None):
-    """
-    Handles Q&A using FAISS for retrieval.
-    Only top-k relevant chunks are used.
-    """
+def ask_ai(question, conversation_history, top_k=TOP_K, stream_placeholder=None, max_chars=1000):
+    """Retrieve top_k chunks from FAISS and ask Ollama using full content."""
     global faiss_index, chunk_mapping
     if not faiss_index:
         raise ValueError("FAISS index not initialized. Call create_or_update_faiss first.")
 
+    # Embed the question
     q_emb = embed_model.encode([question], convert_to_numpy=True, normalize_embeddings=True)
+
+    # Retrieve top-k relevant chunks
     D, I = faiss_index.search(q_emb, top_k)
     relevant_chunks = [chunk_mapping[i] for i in I[0]]
 
-    responses = []
+    # Combine all chunks into a single prompt
+    combined_content = ""
     for chunk in relevant_chunks:
-        prompt = (
-            f"You are a helpful assistant. Use the content below to answer the question.\n\n"
-            f"File: {chunk['filename']} ({chunk['type']}):\n{chunk['content']}\n\n"
-            f"Question: {question}\nAnswer:"
-        )
-        response = chat(model="llama3", messages=conversation_history + [{"role": "user", "content": prompt}])
-        content = response.get('content', '')
-        responses.append(content)
-        if stream_placeholder:
-            stream_placeholder.text("\n\n".join(responses))
+        chunk_text = chunk['content']  # no per-chunk truncation
+        combined_content += f"File: {chunk['filename']} ({chunk['type']}):\n{chunk_text}\n\n"
 
-    final_answer = "\n\n".join(responses)
+    # Build the final prompt
+    prompt = (
+        f"You are a helpful assistant. Use the following content to answer the question.\n\n"
+        f"{combined_content}"
+        f"Question: {question}\nAnswer:"
+    )
+
+    # Ask Ollama
+    conversation_history.append({"role": "user", "content": prompt})
+    final_answer = ""
+    try:
+        stream = ollama.chat(model="llama3", messages=conversation_history, stream=True)
+        for chunk in stream:
+            if "message" in chunk and "content" in chunk["message"]:
+                text_part = chunk["message"]["content"]
+                final_answer += text_part
+                if stream_placeholder:
+                    stream_placeholder.text(final_answer)
+                else:
+                    sys.stdout.write(text_part)
+                    sys.stdout.flush()
+        if not stream_placeholder:
+            print()
+    except Exception as e:
+        final_answer = f"[Error communicating with Ollama: {e}]"
+        if stream_placeholder:
+            stream_placeholder.text(final_answer)
+
     conversation_history.append({"role": "assistant", "content": final_answer})
     return final_answer
 
 # -------------------- Summarization --------------------
 def summarize_files(aggregated_content, conversation_history, stream_placeholder=None):
-    """Summarize all files at once using Ollama."""
     combined_text = "\n\n".join(
         f"{item['filename']}:\n{json.dumps(item['content'], indent=4) if isinstance(item['content'], (dict, list)) else str(item['content'])}"
         for item in aggregated_content
@@ -143,5 +171,5 @@ def summarize_files(aggregated_content, conversation_history, stream_placeholder
     prompt = f"Summarize the following project files:\n\n{combined_text}"
     return ask_ollama_stream(prompt, conversation_history, stream_placeholder=stream_placeholder)
 
-# -------------------- Load persistent memory on startup --------------------
+# -------------------- Load persistent FAISS --------------------
 load_faiss()

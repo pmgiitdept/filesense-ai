@@ -116,11 +116,9 @@ def ask_ai_stream(session_id: str, user_id: str, question: str):
         cleaned_lines = []
         for line in lines:
             if "|" in line:
-                # keep table row only if it has numbers
                 if re.search(r"\d", line):
                     cleaned_lines.append(line)
             else:
-                # normal text, keep
                 cleaned_lines.append(line)
         return "\n".join(cleaned_lines)
 
@@ -128,18 +126,15 @@ def ask_ai_stream(session_id: str, user_id: str, question: str):
         chart_keywords = ["chart", "graph", "bar graph", "plot"]
         is_chart_request = any(word in question.lower() for word in chart_keywords)
 
-        # Retrieve top-K chunks for context
         top_chunks = get_top_chunks(question, top_k=5, user_id=user_id)
         context_text = "\n\n".join(
             [f"[{idx+1}] {c['content'][:500]}..." for idx, c in enumerate(top_chunks)]
         ) if top_chunks else "No relevant context found."
 
-        # Get recent conversation
         recent_conv = get_recent_conversation(session_id, user_id)
         if len(recent_conv) > 2000:
             recent_conv = recent_conv[-2000:]
 
-        # Build the AI prompt
         prompt = f"""
 You are a precise and helpful assistant.
 Use the retrieved context and recent conversation to answer the question.
@@ -156,7 +151,6 @@ Answer:
 """
         store_conversation(session_id, user_id, "user", question)
 
-        # --- Chart Request ---
         if is_chart_request:
             yield f"data: {json.dumps({'text': '📊 Generating chart, please wait...'})}\n\n"
 
@@ -185,7 +179,6 @@ Question: {question}
                 yield f"data: {json.dumps({'text': '⚠ Could not generate chart'})}\n\n"
             return
 
-        # --- Normal AI Streaming ---
         full_ai_text = ""
         try:
             for chunk in ask_ollama_stream(prompt, stream_placeholder=None):

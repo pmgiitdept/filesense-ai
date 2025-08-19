@@ -365,7 +365,6 @@ def build_faiss_from_db(user_id):
     if len(embeddings) > 0:
         faiss_index.add(embeddings)
 
-# Preload all users
 cur.execute("SELECT DISTINCT user_id FROM file_chunks")
 for row in cur.fetchall():
     build_faiss_from_db(row[0])

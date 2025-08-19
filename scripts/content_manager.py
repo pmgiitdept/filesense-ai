@@ -2,28 +2,71 @@ import os
 import json
 import pandas as pd
 from scripts.utils import read_file, DATA_DIR
+from PyPDF2 import PdfReader
+import psycopg2
 
-def gather_all_content():
+DATA_FOLDER = "data"
+
+# PostgreSQL connection (update credentials if needed)
+conn = psycopg2.connect(
+    host="localhost",
+    dbname="filesense_ai",
+    user="postgres",
+    password="25547"
+)
+cur = conn.cursor()
+
+def gather_all_content(user_id=None):
+    """
+    Retrieve all project files for a specific user.
+    Returns a list of dicts: { filename, type, content }.
+    """
     aggregated = []
-    files = os.listdir(DATA_DIR)
 
-    for file in files:
-        file_path = os.path.join(DATA_DIR, file)
-        ext = os.path.splitext(file)[1].lower()
-
-        try:
-            content = read_file(file_path)
+    if user_id is not None:
+        # If user_id is provided, fetch files stored in DB for that user
+        cur.execute("""
+            SELECT filename, file_type, chunk_text
+            FROM file_chunks
+            WHERE session_id LIKE %s
+            GROUP BY filename, file_type, chunk_text
+        """, (f"{user_id}_%",))
+        rows = cur.fetchall()
+        for row in rows:
             aggregated.append({
-                "filename": file,
-                "type": ext.replace(".", ""),
-                "content": content
+                "filename": row[0],
+                "type": row[1],
+                "content": row[2]
             })
-        except Exception as e:
-            aggregated.append({
-                "filename": file,
-                "type": ext.replace(".", ""),
-                "content": f"[Error reading file: {e}]"
-            })
+    else:
+        # Fallback: load all files from DATA_FOLDER
+        for filename in os.listdir(DATA_FOLDER):
+            file_path = os.path.join(DATA_FOLDER, filename)
+            if os.path.isfile(file_path):
+                ext = filename.split('.')[-1].lower()
+                content = None
+                try:
+                    if ext == "txt":
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                    elif ext == "json":
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            content = json.load(f)
+                    elif ext == "csv":
+                        content = pd.read_csv(file_path).to_dict(orient="records")
+                    elif ext == "pdf":
+                        reader = PdfReader(file_path)
+                        content = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+                    else:
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                except Exception as e:
+                    content = ""
+                aggregated.append({
+                    "filename": filename,
+                    "type": ext,
+                    "content": content
+                })
 
     return aggregated
 

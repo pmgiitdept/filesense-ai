@@ -1,0 +1,6 @@
+{
+  "hello": ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"],
+  "thanks": ["thanks", "thank you", "ty", "thx"],
+  "bye": ["bye", "goodbye", "see you", "later"],
+  "how_are_you": ["how are you", "how's it going", "sup", "what's up"]
+}
